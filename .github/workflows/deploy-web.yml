@@ -1,0 +1,48 @@
+name: Сборка и публикация зоомагазина
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.2'
+          channel: stable
+          cache: true
+
+      - name: Зависимости
+        run: flutter pub get
+
+      - name: Анализ и формат
+        run: |
+          dart format --set-exit-if-changed lib test
+          flutter analyze
+
+      - name: Тесты
+        run: flutter test
+
+      - name: Релизная сборка для подкаталога GitHub Pages
+        env:
+          API_BASE_URL: ${{ vars.API_BASE_URL }}
+        run: |
+          BASE="/${{ github.event.repository.name }}/"
+          if [ -z "$API_BASE_URL" ]; then
+            API_BASE_URL="https://api.example.com/api"
+          fi
+          flutter build web --release --base-href "$BASE" --dart-define=API_BASE_URL="$API_BASE_URL"
+          cp build/web/index.html build/web/404.html
+
+      - name: Публикация ветки gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web
