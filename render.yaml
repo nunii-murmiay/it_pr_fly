@@ -1,8 +1,0 @@
-# Free-вариант (без диска: после сна Render данные могут пропасть — тогда снова seed).
-services:
-  - type: web
-    name: zoomag-pocketbase
-    runtime: docker
-    rootDir: pocketbase
-    plan: free
-    healthCheckPath: /api/health

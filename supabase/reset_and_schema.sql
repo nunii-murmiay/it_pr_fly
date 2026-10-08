@@ -202,7 +202,9 @@ create table public.sale_items (
 );
 
 -- Отчёт для админа (остатки в ₽)
-create or replace view public.inventory_valuation as
+create or replace view public.inventory_valuation
+with (security_invoker = true)
+as
 select
   p.id as product_id,
   p.name,
@@ -214,6 +216,8 @@ select
 from public.products p
 join public.suppliers s on s.id = p.supplier_id
 where p.deleted = false;
+
+grant select on public.inventory_valuation to authenticated;
 
 -- ========== AUTH TRIGGER ==========
 create or replace function public.handle_new_user()
@@ -433,6 +437,9 @@ create policy customers_select on public.customers for select to authenticated
   );
 create policy customers_write on public.customers for all to authenticated
   using (public.is_staff()) with check (public.is_staff());
+-- Регистрация покупателя с сайта
+create policy customers_insert_self on public.customers for insert to authenticated
+  with check (true);
 
 create policy loyalty_select on public.loyalty_cards for select to authenticated
   using (
@@ -441,6 +448,8 @@ create policy loyalty_select on public.loyalty_cards for select to authenticated
   );
 create policy loyalty_write on public.loyalty_cards for all to authenticated
   using (public.is_staff()) with check (public.is_staff());
+create policy loyalty_insert_self on public.loyalty_cards for insert to authenticated
+  with check (true);
 
 create policy sales_select on public.sales for select to authenticated
   using (

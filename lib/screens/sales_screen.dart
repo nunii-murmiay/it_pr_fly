@@ -98,7 +98,8 @@ class _SalesScreenState extends State<SalesScreen> {
       if (line.productId == null) continue;
       final qty = int.tryParse(line.qty.text.trim()) ?? 0;
       if (qty < 1) continue;
-      final product = _products.where((p) => p.id == line.productId).firstOrNull;
+      final product =
+          _products.where((p) => p.id == line.productId).firstOrNull;
       if (product == null) continue;
       sum += product.price * qty;
     }
@@ -231,7 +232,8 @@ class _SalesScreenState extends State<SalesScreen> {
       if (line.productId == null) continue;
       final qty = int.tryParse(line.qty.text.trim()) ?? 0;
       if (qty < 1) continue;
-      final product = _products.where((p) => p.id == line.productId).firstOrNull;
+      final product =
+          _products.where((p) => p.id == line.productId).firstOrNull;
       if (product != null && qty > product.stock) {
         shortages['$i'] =
             'Недостаточно «${product.name}»: на складе ${product.stock}';
@@ -276,7 +278,9 @@ class _SalesScreenState extends State<SalesScreen> {
       final earned = result['pointsEarned'];
       final spent = result['pointsRedeemed'];
       final parts = <String>['Продажа оформлена'];
-      if (spent is num && spent > 0) parts.add('списано ${spent.toInt()} баллов');
+      if (spent is num && spent > 0) {
+        parts.add('списано ${spent.toInt()} баллов');
+      }
       if (earned is num && earned > 0) {
         parts.add('начислено ${earned.toInt()}');
       }
@@ -336,7 +340,8 @@ class _SalesScreenState extends State<SalesScreen> {
     final filtered = _filteredCustomers;
     final customer = _selectedCustomer;
     final subtotal = _cartSubtotal;
-    final redeem = _redeemPoints ? _redeemRequested.clamp(0, _maxRedeemable) : 0;
+    final redeem =
+        _redeemPoints ? _redeemRequested.clamp(0, _maxRedeemable) : 0;
     final payable = (subtotal - redeem).clamp(0, double.infinity);
     final willEarn = (payable / 100).floor();
 

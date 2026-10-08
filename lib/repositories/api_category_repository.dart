@@ -1,63 +1,49 @@
-import 'package:dio/dio.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../core/api_client.dart';
-import '../core/api_exceptions.dart';
 import '../core/auth_session.dart';
-import '../core/pb_query.dart';
+import '../core/supabase_map.dart';
 import '../models/category.dart';
 import '../models/category_query.dart';
 import '../models/page_result.dart';
 import 'category_repository.dart';
 
 class ApiCategoryRepository implements CategoryRepository {
-  ApiCategoryRepository(this._dio, this._auth);
-  final Dio _dio;
-  final AuthSession _auth;
-  CancelToken? _findToken;
+  ApiCategoryRepository(this._client, this._auth);
 
-  static const _path = '/collections/categories/records';
+  final SupabaseClient _client;
+  final AuthSession _auth;
+
+  ProductCategory _map(Map<String, dynamic> row) =>
+      ProductCategory.fromJson(mapCategoryRow(row));
 
   @override
   Future<PageResult<ProductCategory>> find(CategoryQuery q) async {
     await _auth.ensureLoggedIn();
-    _findToken?.cancel('устаревший поиск');
-    _findToken = CancelToken();
-    final token = _findToken!;
-    final parts =
-        <String>[
-          if (q.search.trim().isNotEmpty)
-            pbSearchFilter(q.search, const ['name', 'description']),
-        ].where((e) => e.isNotEmpty).toList();
-
-    return guardRead(() async {
-      final response = await _dio.get(
-        _path,
-        queryParameters:
-            PbListQuery(
-              page: q.page,
-              perPage: q.size,
-              sort: pbSort(q.sortField, q.sortAscending),
-              filterParts: parts,
-              includeDeleted: q.includeDeleted,
-            ).toParams(),
-        cancelToken: token,
-      );
-      final mapped = pbPageResult(
-        Map<String, dynamic>.from(response.data as Map),
-      );
+    return guardSb(() async {
+      var query = _client.from('categories').select();
+      if (!q.includeDeleted) query = query.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        query = query.or('name.ilike.%$s%,description.ilike.%$s%');
+      }
+      final start = (q.page - 1) * q.size;
+      final rows = await query.order('name').range(start, start + q.size - 1);
+      var countQ = _client.from('categories').select('id');
+      if (!q.includeDeleted) countQ = countQ.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        countQ = countQ.or('name.ilike.%$s%,description.ilike.%$s%');
+      }
+      final total = ((await countQ) as List).length;
       return PageResult(
         items:
-            (mapped['items'] as List)
+            (rows as List)
                 .whereType<Map>()
-                .map(
-                  (e) => ProductCategory.fromJson(
-                    pbRecordToApp(Map<String, dynamic>.from(e)),
-                  ),
-                )
+                .map((e) => _map(Map<String, dynamic>.from(e)))
                 .toList(),
-        page: (mapped['page'] as num).toInt(),
-        size: (mapped['size'] as num).toInt(),
-        total: (mapped['total'] as num).toInt(),
+        page: q.page,
+        size: q.size,
+        total: total,
       );
     });
   }
@@ -66,13 +52,12 @@ class ApiCategoryRepository implements CategoryRepository {
   Future<ProductCategory?> findById(String id) async {
     await _auth.ensureLoggedIn();
     try {
-      return await guardRead(() async {
-        final r = await _dio.get('$_path/$id');
-        return ProductCategory.fromJson(
-          pbRecordToApp(Map<String, dynamic>.from(r.data as Map)),
-        );
+      return await guardSb(() async {
+        final row =
+            await _client.from('categories').select().eq('id', id).single();
+        return _map(Map<String, dynamic>.from(row));
       });
-    } on NotFoundException {
+    } catch (_) {
       return null;
     }
   }
@@ -85,64 +70,71 @@ class ApiCategoryRepository implements CategoryRepository {
     return page.items;
   }
 
-  Map<String, dynamic> _body(ProductCategory c) => {
-    'name': c.name,
-    'description': c.description,
-    'iconName': c.iconName,
-    'deleted': false,
-  };
-
   @override
-  Future<ProductCategory> create(ProductCategory category) async {
+  Future<ProductCategory> create(ProductCategory c) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final r = await _dio.post(_path, data: _body(category));
-      return ProductCategory.fromJson(
-        pbRecordToApp(Map<String, dynamic>.from(r.data as Map)),
-      );
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('categories')
+              .insert({
+                'name': c.name,
+                'description': c.description,
+                'icon_name': c.iconName,
+              })
+              .select()
+              .single();
+      return _map(Map<String, dynamic>.from(row));
     });
   }
 
   @override
-  Future<ProductCategory> update(ProductCategory category) async {
+  Future<ProductCategory> update(ProductCategory c) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final r = await _dio.patch(
-        '$_path/${category.id}',
-        data: _body(category),
-      );
-      return ProductCategory.fromJson(
-        pbRecordToApp(Map<String, dynamic>.from(r.data as Map)),
-      );
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('categories')
+              .update({
+                'name': c.name,
+                'description': c.description,
+                'icon_name': c.iconName,
+              })
+              .eq('id', c.id)
+              .select()
+              .single();
+      return _map(Map<String, dynamic>.from(row));
     });
   }
 
   @override
   Future<void> softDelete(String id) async {
     await _auth.ensureLibrarian();
-    await guard(
-      () => _dio.patch(
-        '$_path/$id',
-        data: {
-          'deleted': true,
-          'deletedAt': DateTime.now().toUtc().toIso8601String(),
-        },
-      ),
+    await guardSb(
+      () => _client
+          .from('categories')
+          .update({
+            'deleted': true,
+            'deleted_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', id),
     );
   }
 
   @override
   Future<void> hardDelete(String id) async {
     await _auth.ensureAdmin();
-    await guard(() => _dio.delete('$_path/$id'));
+    await guardSb(() => _client.from('categories').delete().eq('id', id));
   }
 
   @override
   Future<void> restore(String id) async {
     await _auth.ensureAdmin();
-    await guard(
-      () =>
-          _dio.patch('$_path/$id', data: {'deleted': false, 'deletedAt': null}),
+    await guardSb(
+      () => _client
+          .from('categories')
+          .update({'deleted': false, 'deleted_at': null})
+          .eq('id', id),
     );
   }
 

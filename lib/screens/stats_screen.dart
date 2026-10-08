@@ -1,9 +1,9 @@
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../core/api_client.dart';
 import '../core/api_exceptions.dart';
+import '../core/supabase_map.dart';
 import '../state/auth_notifier.dart';
 
 /// Статистика магазина — экран только для администратора.
@@ -22,6 +22,7 @@ class _StatsScreenState extends State<StatsScreen> {
   int sales = 0;
   int suppliers = 0;
   int users = 0;
+  double stockValue = 0;
 
   @override
   void initState() {
@@ -35,20 +36,24 @@ class _StatsScreenState extends State<StatsScreen> {
       _error = null;
     });
     try {
-      final dio = context.read<Dio>();
-      Future<int> total(String path) async {
-        final data = await guard(() async {
-          final r = await dio.get(path);
-          return r.data as Map<String, dynamic>;
-        });
-        return (data['totalItems'] as num?)?.toInt() ?? 0;
+      final client = context.read<SupabaseClient>();
+      Future<int> count(String table) async {
+        final rows = await client.from(table).select('id').eq('deleted', false);
+        return (rows as List).length;
       }
 
-      final p = await total('/collections/products/records?perPage=1');
-      final c = await total('/collections/customers/records?perPage=1');
-      final s = await total('/collections/sales/records?perPage=1');
-      final sup = await total('/collections/suppliers/records?perPage=1');
-      final u = await total('/collections/users/records?perPage=1');
+      final p = await count('products');
+      final c = await count('customers');
+      final s = await count('sales');
+      final sup = await count('suppliers');
+      final u = ((await client.from('profiles').select('id')) as List).length;
+      final valuation = await client
+          .from('inventory_valuation')
+          .select('stock_value');
+      var sum = 0.0;
+      for (final row in (valuation as List).whereType<Map>()) {
+        sum += (row['stock_value'] as num?)?.toDouble() ?? 0;
+      }
 
       if (!mounted) return;
       setState(() {
@@ -57,6 +62,7 @@ class _StatsScreenState extends State<StatsScreen> {
         sales = s;
         suppliers = sup;
         users = u;
+        stockValue = sum;
         _loading = false;
       });
     } on ForbiddenException catch (e) {
@@ -77,12 +83,20 @@ class _StatsScreenState extends State<StatsScreen> {
         _error = e.message;
         _loading = false;
       });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = mapSupabaseError(e).message;
+        _loading = false;
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final role = context.watch<AuthNotifier>().user?.role.label ?? '—';
+    final user = context.watch<AuthNotifier>().user;
+    final narrow = MediaQuery.sizeOf(context).width < 600;
+    final pad = narrow ? 12.0 : 16.0;
 
     return Scaffold(
       appBar: AppBar(
@@ -96,67 +110,42 @@ class _StatsScreenState extends State<StatsScreen> {
               ? const Center(child: CircularProgressIndicator())
               : _error != null
               ? Center(child: Text(_error!))
-              : Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Сводка магазина (роль: $role)',
-                      style: Theme.of(context).textTheme.titleLarge,
-                    ),
-                    const SizedBox(height: 16),
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 12,
-                      children: [
-                        _StatCard('Товары', products, Icons.inventory_2),
-                        _StatCard('Клиенты', customers, Icons.people),
-                        _StatCard('Продажи', sales, Icons.point_of_sale),
-                        _StatCard('Поставщики', suppliers, Icons.business),
-                        _StatCard(
-                          'Пользователи',
-                          users,
-                          Icons.admin_panel_settings,
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+              : ListView(
+                padding: EdgeInsets.all(pad),
+                children: [
+                  Text(
+                    'Администратор: ${user?.fullName ?? '—'}',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 12),
+                  _StatCard(title: 'Товары', value: '$products'),
+                  _StatCard(title: 'Клиенты', value: '$customers'),
+                  _StatCard(title: 'Продажи', value: '$sales'),
+                  _StatCard(title: 'Поставщики', value: '$suppliers'),
+                  _StatCard(title: 'Пользователи', value: '$users'),
+                  _StatCard(
+                    title: 'Остатки ₽',
+                    value: stockValue.toStringAsFixed(0),
+                  ),
+                ],
               ),
     );
   }
 }
 
 class _StatCard extends StatelessWidget {
-  final String label;
-  final int value;
-  final IconData icon;
+  final String title;
+  final String value;
 
-  const _StatCard(this.label, this.value, this.icon);
+  const _StatCard({required this.title, required this.value});
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return SizedBox(
-      width: 160,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              Icon(icon, color: theme.colorScheme.primary),
-              const SizedBox(height: 8),
-              Text(
-                '$value',
-                style: theme.textTheme.headlineMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              Text(label),
-            ],
-          ),
-        ),
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ListTile(
+        title: Text(title),
+        trailing: Text(value, style: Theme.of(context).textTheme.titleLarge),
       ),
     );
   }

@@ -71,8 +71,7 @@ class _MyPurchasesScreenState extends State<MyPurchasesScreen> {
     if (lines.isEmpty) return 'Чек №${s['id']}';
     if (lines.length == 1) {
       final product = lines.first is Map ? lines.first['product'] : null;
-      final name =
-          product is Map ? product['name']?.toString() : null;
+      final name = product is Map ? product['name']?.toString() : null;
       return name ?? 'Чек №${s['id']}';
     }
     return 'Чек · ${lines.length} поз.';
@@ -105,9 +104,7 @@ class _MyPurchasesScreenState extends State<MyPurchasesScreen> {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                   const SizedBox(height: 4),
-                  const Text(
-                    'Нажмите на покупку, чтобы открыть полный чек.',
-                  ),
+                  const Text('Нажмите на покупку, чтобы открыть полный чек.'),
                   if (card != null) ...[
                     const SizedBox(height: 12),
                     Card(

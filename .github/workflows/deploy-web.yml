@@ -32,13 +32,16 @@ jobs:
 
       - name: Релизная сборка для подкаталога GitHub Pages
         env:
-          API_BASE_URL: ${{ vars.API_BASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           BASE="/${{ github.event.repository.name }}/"
-          if [ -z "$API_BASE_URL" ]; then
-            API_BASE_URL="https://api.example.com/api"
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "WARNING: secret SUPABASE_URL пуст — берутся значения из config.dart"
           fi
-          flutter build web --release --base-href "$BASE" --dart-define=API_BASE_URL="$API_BASE_URL"
+          flutter build web --release --base-href "$BASE" \
+            --dart-define=SUPABASE_URL="${SUPABASE_URL}" \
+            --dart-define=SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY}"
           cp build/web/index.html build/web/404.html
 
       - name: Публикация ветки gh-pages

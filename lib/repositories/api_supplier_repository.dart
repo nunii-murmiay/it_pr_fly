@@ -1,71 +1,68 @@
-import 'package:dio/dio.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../core/api_client.dart';
 import '../core/api_exceptions.dart';
 import '../core/auth_session.dart';
-import '../core/pb_query.dart';
+import '../core/supabase_map.dart';
 import '../models/page_result.dart';
 import '../models/supplier.dart';
 import '../models/supplier_query.dart';
 import 'supplier_repository.dart';
 
 class ApiSupplierRepository implements SupplierRepository {
-  ApiSupplierRepository(this._dio, this._auth);
-  final Dio _dio;
-  final AuthSession _auth;
-  CancelToken? _findToken;
+  ApiSupplierRepository(this._client, this._auth);
 
-  static const _path = '/collections/suppliers/records';
+  final SupabaseClient _client;
+  final AuthSession _auth;
+
+  Supplier _map(Map<String, dynamic> row) =>
+      Supplier.fromJson(mapSupplierRow(row));
 
   @override
   Future<PageResult<Supplier>> find(SupplierQuery q) async {
     await _auth.ensureLoggedIn();
-    _findToken?.cancel('устаревший поиск');
-    _findToken = CancelToken();
-    final token = _findToken!;
-    final parts =
-        <String>[
-          if (q.search.trim().isNotEmpty)
-            pbSearchFilter(q.search, const [
-              'name',
-              'country',
-              'contactPerson',
-              'email',
-            ]),
-          if (q.country != null && q.country!.isNotEmpty)
-            'country = "${pbEscape(q.country!)}"',
-        ].where((e) => e.isNotEmpty).toList();
-
-    return guardRead(() async {
-      final response = await _dio.get(
-        _path,
-        queryParameters:
-            PbListQuery(
-              page: q.page,
-              perPage: q.size,
-              sort: pbSort(q.sortField, q.sortAscending),
-              filterParts: parts,
-              includeDeleted: q.includeDeleted,
-            ).toParams(),
-        cancelToken: token,
-      );
-      final mapped = pbPageResult(
-        Map<String, dynamic>.from(response.data as Map),
-      );
-      return PageResult(
-        items:
-            (mapped['items'] as List)
-                .whereType<Map>()
-                .map(
-                  (e) => Supplier.fromJson(
-                    pbRecordToApp(Map<String, dynamic>.from(e)),
-                  ),
-                )
-                .toList(),
-        page: (mapped['page'] as num).toInt(),
-        size: (mapped['size'] as num).toInt(),
-        total: (mapped['total'] as num).toInt(),
-      );
+    return guardSb(() async {
+      var query = _client.from('suppliers').select();
+      if (!q.includeDeleted) {
+        query = query.eq('deleted', false);
+      }
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        query = query.or('name.ilike.%$s%,country.ilike.%$s%,email.ilike.%$s%');
+      }
+      if (q.country != null && q.country!.isNotEmpty) {
+        query = query.eq('country', q.country!);
+      }
+      final ascending = q.sortAscending;
+      final sort = switch (q.sortField) {
+        'country' => 'country',
+        'rating' => 'rating',
+        _ => 'name',
+      };
+      final start = (q.page - 1) * q.size;
+      final end = start + q.size - 1;
+      final rows = await query
+          .order(sort, ascending: ascending)
+          .range(start, end);
+      // count
+      var countQ = _client.from('suppliers').select('id');
+      if (!q.includeDeleted) countQ = countQ.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        countQ = countQ.or(
+          'name.ilike.%$s%,country.ilike.%$s%,email.ilike.%$s%',
+        );
+      }
+      if (q.country != null && q.country!.isNotEmpty) {
+        countQ = countQ.eq('country', q.country!);
+      }
+      final all = await countQ;
+      final total = (all as List).length;
+      final items =
+          (rows as List)
+              .whereType<Map>()
+              .map((e) => _map(Map<String, dynamic>.from(e)))
+              .toList();
+      return PageResult(items: items, page: q.page, size: q.size, total: total);
     });
   }
 
@@ -73,13 +70,14 @@ class ApiSupplierRepository implements SupplierRepository {
   Future<Supplier?> findById(String id) async {
     await _auth.ensureLoggedIn();
     try {
-      return await guardRead(() async {
-        final r = await _dio.get('$_path/$id');
-        return Supplier.fromJson(
-          pbRecordToApp(Map<String, dynamic>.from(r.data as Map)),
-        );
+      return await guardSb(() async {
+        final row =
+            await _client.from('suppliers').select().eq('id', id).single();
+        return _map(Map<String, dynamic>.from(row));
       });
     } on NotFoundException {
+      return null;
+    } catch (_) {
       return null;
     }
   }
@@ -92,67 +90,77 @@ class ApiSupplierRepository implements SupplierRepository {
     return page.items;
   }
 
-  Map<String, dynamic> _body(Supplier s) => {
-    'name': s.name,
-    'country': s.country,
-    'contactPerson': s.contactPerson,
-    'phone': s.phone,
-    'email': s.email,
-    'rating': s.rating,
-    'deleted': false,
-  };
-
   @override
-  Future<Supplier> create(Supplier supplier) async {
+  Future<Supplier> create(Supplier s) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final r = await _dio.post(_path, data: _body(supplier));
-      return Supplier.fromJson(
-        pbRecordToApp(Map<String, dynamic>.from(r.data as Map)),
-      );
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('suppliers')
+              .insert({
+                'name': s.name,
+                'country': s.country,
+                'contact_person': s.contactPerson,
+                'phone': s.phone,
+                'email': s.email,
+                'rating': s.rating,
+              })
+              .select()
+              .single();
+      return _map(Map<String, dynamic>.from(row));
     });
   }
 
   @override
-  Future<Supplier> update(Supplier supplier) async {
+  Future<Supplier> update(Supplier s) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final r = await _dio.patch(
-        '$_path/${supplier.id}',
-        data: _body(supplier),
-      );
-      return Supplier.fromJson(
-        pbRecordToApp(Map<String, dynamic>.from(r.data as Map)),
-      );
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('suppliers')
+              .update({
+                'name': s.name,
+                'country': s.country,
+                'contact_person': s.contactPerson,
+                'phone': s.phone,
+                'email': s.email,
+                'rating': s.rating,
+              })
+              .eq('id', s.id)
+              .select()
+              .single();
+      return _map(Map<String, dynamic>.from(row));
     });
   }
 
   @override
   Future<void> softDelete(String id) async {
     await _auth.ensureLibrarian();
-    await guard(
-      () => _dio.patch(
-        '$_path/$id',
-        data: {
-          'deleted': true,
-          'deletedAt': DateTime.now().toUtc().toIso8601String(),
-        },
-      ),
+    await guardSb(
+      () => _client
+          .from('suppliers')
+          .update({
+            'deleted': true,
+            'deleted_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', id),
     );
   }
 
   @override
   Future<void> hardDelete(String id) async {
     await _auth.ensureAdmin();
-    await guard(() => _dio.delete('$_path/$id'));
+    await guardSb(() => _client.from('suppliers').delete().eq('id', id));
   }
 
   @override
   Future<void> restore(String id) async {
     await _auth.ensureAdmin();
-    await guard(
-      () =>
-          _dio.patch('$_path/$id', data: {'deleted': false, 'deletedAt': null}),
+    await guardSb(
+      () => _client
+          .from('suppliers')
+          .update({'deleted': false, 'deleted_at': null})
+          .eq('id', id),
     );
   }
 

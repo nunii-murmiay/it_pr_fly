@@ -1,16 +1,16 @@
 import 'dart:async';
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'api/auth_api.dart';
-import 'core/api_client.dart';
 import 'core/auth_session.dart';
 import 'core/catalog_cache.dart';
+import 'core/config.dart';
 import 'repositories/api_brand_repository.dart';
 import 'repositories/api_category_repository.dart';
 import 'repositories/api_customer_repository.dart'
@@ -37,6 +37,10 @@ final GlobalKey<ScaffoldMessengerState> rootMessengerKey =
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   usePathUrlStrategy();
+  await Supabase.initialize(
+    url: supabaseUrl,
+    anonKey: supabaseAnonKey, // ignore: deprecated_member_use
+  );
   final prefs = await SharedPreferences.getInstance();
   runApp(PetShopApp(prefs: prefs));
 }
@@ -52,10 +56,10 @@ class PetShopApp extends StatefulWidget {
 
 class _PetShopAppState extends State<PetShopApp> {
   late final AuthNotifier _auth;
-  late final Dio _dio;
   late final AuthApi _authApi;
   late final AuthSession _session;
   late final GoRouter _router;
+  late final SupabaseClient _client;
   Timer? _maxSessionTimer;
 
   late final ApiProductRepository _productRepo;
@@ -70,22 +74,16 @@ class _PetShopAppState extends State<PetShopApp> {
   void initState() {
     super.initState();
 
-    late AuthNotifier authRef;
-    _dio = buildDio(
-      tokenProvider: () => authRef.accessToken,
-      authProvider: () => authRef,
-    );
-    _authApi = AuthApi(_dio);
+    _client = Supabase.instance.client;
+    _authApi = AuthApi(_client);
     _auth = AuthNotifier(widget.prefs, _authApi);
-    authRef = _auth;
-
     _session = AuthSession(_auth);
-    _productRepo = ApiProductRepository(_dio, _session);
-    _supplierRepo = ApiSupplierRepository(_dio, _session);
-    _brandRepo = ApiBrandRepository(_dio, _session);
-    _categoryRepo = ApiCategoryRepository(_dio, _session);
-    _customerRepo = ApiCustomerRepository(_dio, _session);
-    _salesRepo = ApiSalesRepository(_dio, _session);
+    _productRepo = ApiProductRepository(_client, _session);
+    _supplierRepo = ApiSupplierRepository(_client, _session);
+    _brandRepo = ApiBrandRepository(_client, _session);
+    _categoryRepo = ApiCategoryRepository(_client, _session);
+    _customerRepo = ApiCustomerRepository(_client, _session);
+    _salesRepo = ApiSalesRepository(_client, _session);
     _catalog = CatalogCache(
       brands: _brandRepo,
       categories: _categoryRepo,
@@ -142,7 +140,7 @@ class _PetShopAppState extends State<PetShopApp> {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        Provider<Dio>.value(value: _dio),
+        Provider<SupabaseClient>.value(value: _client),
         Provider<AuthApi>.value(value: _authApi),
         Provider<AuthSession>.value(value: _session),
         ChangeNotifierProvider<AuthNotifier>.value(value: _auth),
@@ -182,7 +180,10 @@ class _PetShopAppState extends State<PetShopApp> {
                 secondary: const Color(0xFFD97706),
                 brightness: Brightness.light,
               ),
-              cardTheme: const CardTheme(elevation: 1, margin: EdgeInsets.zero),
+              cardTheme: const CardThemeData(
+                elevation: 1,
+                margin: EdgeInsets.zero,
+              ),
               appBarTheme: const AppBarTheme(
                 centerTitle: false,
                 elevation: 0,

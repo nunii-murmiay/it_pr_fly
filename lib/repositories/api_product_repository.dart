@@ -1,89 +1,136 @@
-import 'package:dio/dio.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../core/api_client.dart';
-import '../core/api_exceptions.dart';
 import '../core/auth_session.dart';
-import '../core/pb_query.dart';
+import '../core/supabase_map.dart';
 import '../models/page_result.dart';
 import '../models/product.dart';
 import '../models/product_query.dart';
 import 'product_repository.dart';
 
 class ApiProductRepository implements ProductRepository {
-  ApiProductRepository(this._dio, this._auth);
+  ApiProductRepository(this._client, this._auth);
 
-  final Dio _dio;
+  final SupabaseClient _client;
   final AuthSession _auth;
-  CancelToken? _findToken;
 
-  static const _path = '/collections/products/records';
-  static const _expand = 'supplier,brands,categories';
+  static const _select =
+      '*, suppliers(*), product_brands(brand_id, brands(*)), product_categories(category_id, categories(*))';
 
-  Product _map(Map<String, dynamic> raw) =>
-      Product.fromJson(pbRecordToApp(Map<String, dynamic>.from(raw)));
+  Product _map(Map<String, dynamic> row) =>
+      Product.fromJson(mapProductRow(row));
 
-  Map<String, dynamic> _write(Product p) => {
-    'name': p.name,
-    'sku': p.sku,
-    'supplier': p.supplierId,
-    'categories': p.categoryIds,
-    'brands': p.brandIds,
-    'price': p.price,
-    'stock': p.stock,
-    'rating': p.rating,
-    'deleted': false,
-  };
-
-  PbListQuery _q(ProductQuery q) {
-    final parts =
-        <String>[
-          if (q.search.trim().isNotEmpty)
-            pbSearchFilter(q.search, const ['name', 'sku']),
-          if (q.supplierId != null && q.supplierId!.isNotEmpty)
-            pbRelationEquals('supplier', q.supplierId),
-          if (q.brandId != null && q.brandId!.isNotEmpty)
-            pbRelationContains('brands', q.brandId),
-          if (q.categoryId != null && q.categoryId!.isNotEmpty)
-            pbRelationContains('categories', q.categoryId),
-          if (q.priceFrom != null) 'price >= ${q.priceFrom}',
-          if (q.priceTo != null) 'price <= ${q.priceTo}',
-        ].where((e) => e.isNotEmpty).toList();
-
-    return PbListQuery(
-      page: q.page,
-      perPage: q.size,
-      sort: pbSort(q.sortField, q.sortAscending),
-      filterParts: parts,
-      expand: _expand,
-      includeDeleted: q.includeDeleted,
-    );
+  Future<void> _syncLinks(
+    String productId,
+    List<String> brandIds,
+    List<String> categoryIds,
+  ) async {
+    await _client.from('product_brands').delete().eq('product_id', productId);
+    await _client
+        .from('product_categories')
+        .delete()
+        .eq('product_id', productId);
+    if (brandIds.isNotEmpty) {
+      await _client.from('product_brands').insert([
+        for (final id in brandIds) {'product_id': productId, 'brand_id': id},
+      ]);
+    }
+    if (categoryIds.isNotEmpty) {
+      await _client.from('product_categories').insert([
+        for (final id in categoryIds)
+          {'product_id': productId, 'category_id': id},
+      ]);
+    }
   }
 
   @override
   Future<PageResult<Product>> find(ProductQuery q) async {
     await _auth.ensureLoggedIn();
-    _findToken?.cancel('устаревший поиск');
-    _findToken = CancelToken();
-    final token = _findToken!;
+    return guardSb(() async {
+      // Для фильтров по M2M сначала получаем id, затем выбираем товары.
+      Set<String>? restrictIds;
+      if (q.brandId != null && q.brandId!.isNotEmpty) {
+        final links = await _client
+            .from('product_brands')
+            .select('product_id')
+            .eq('brand_id', q.brandId!);
+        restrictIds = {
+          for (final r in (links as List).whereType<Map>())
+            '${r['product_id']}',
+        };
+      }
+      if (q.categoryId != null && q.categoryId!.isNotEmpty) {
+        final links = await _client
+            .from('product_categories')
+            .select('product_id')
+            .eq('category_id', q.categoryId!);
+        final ids = {
+          for (final r in (links as List).whereType<Map>())
+            '${r['product_id']}',
+        };
+        restrictIds = restrictIds == null ? ids : restrictIds.intersection(ids);
+      }
 
-    return guardRead(() async {
-      final response = await _dio.get(
-        _path,
-        queryParameters: _q(q).toParams(),
-        cancelToken: token,
-      );
-      final mapped = pbPageResult(
-        Map<String, dynamic>.from(response.data as Map),
-      );
+      if (restrictIds != null && restrictIds.isEmpty) {
+        return PageResult(
+          items: const [],
+          page: q.page,
+          size: q.size,
+          total: 0,
+        );
+      }
+
+      var query = _client.from('products').select(_select);
+      if (!q.includeDeleted) query = query.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        query = query.or('name.ilike.%$s%,sku.ilike.%$s%');
+      }
+      if (q.supplierId != null && q.supplierId!.isNotEmpty) {
+        query = query.eq('supplier_id', q.supplierId!);
+      }
+      if (q.priceFrom != null) query = query.gte('price', q.priceFrom!);
+      if (q.priceTo != null) query = query.lte('price', q.priceTo!);
+      if (restrictIds != null) {
+        query = query.inFilter('id', restrictIds.toList());
+      }
+
+      final sort = switch (q.sortField) {
+        'price' => 'price',
+        'stock' => 'stock',
+        'rating' => 'rating',
+        'sku' => 'sku',
+        _ => 'name',
+      };
+      final start = (q.page - 1) * q.size;
+      final rows = await query
+          .order(sort, ascending: q.sortAscending)
+          .range(start, start + q.size - 1);
+
+      var countQ = _client.from('products').select('id');
+      if (!q.includeDeleted) countQ = countQ.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        countQ = countQ.or('name.ilike.%$s%,sku.ilike.%$s%');
+      }
+      if (q.supplierId != null && q.supplierId!.isNotEmpty) {
+        countQ = countQ.eq('supplier_id', q.supplierId!);
+      }
+      if (q.priceFrom != null) countQ = countQ.gte('price', q.priceFrom!);
+      if (q.priceTo != null) countQ = countQ.lte('price', q.priceTo!);
+      if (restrictIds != null) {
+        countQ = countQ.inFilter('id', restrictIds.toList());
+      }
+      final total = ((await countQ) as List).length;
+
       return PageResult(
         items:
-            (mapped['items'] as List)
+            (rows as List)
                 .whereType<Map>()
                 .map((e) => _map(Map<String, dynamic>.from(e)))
                 .toList(),
-        page: (mapped['page'] as num).toInt(),
-        size: (mapped['size'] as num).toInt(),
-        total: (mapped['total'] as num).toInt(),
+        page: q.page,
+        size: q.size,
+        total: total,
       );
     });
   }
@@ -92,14 +139,16 @@ class ApiProductRepository implements ProductRepository {
   Future<Product?> findById(String id) async {
     await _auth.ensureLoggedIn();
     try {
-      return await guardRead(() async {
-        final response = await _dio.get(
-          '$_path/$id',
-          queryParameters: {'expand': _expand},
-        );
-        return _map(Map<String, dynamic>.from(response.data as Map));
+      return await guardSb(() async {
+        final row =
+            await _client
+                .from('products')
+                .select(_select)
+                .eq('id', id)
+                .single();
+        return _map(Map<String, dynamic>.from(row));
       });
-    } on NotFoundException {
+    } catch (_) {
       return null;
     }
   }
@@ -115,55 +164,74 @@ class ApiProductRepository implements ProductRepository {
   @override
   Future<Product> create(Product product) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final response = await _dio.post(
-        _path,
-        data: _write(product),
-        queryParameters: {'expand': _expand},
-      );
-      return _map(Map<String, dynamic>.from(response.data as Map));
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('products')
+              .insert({
+                'name': product.name,
+                'sku': product.sku,
+                'supplier_id': product.supplierId,
+                'price': product.price,
+                'stock': product.stock,
+                'rating': product.rating,
+              })
+              .select()
+              .single();
+      final id = row['id'] as String;
+      await _syncLinks(id, product.brandIds, product.categoryIds);
+      return (await findById(id))!;
     });
   }
 
   @override
   Future<Product> update(Product product) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final response = await _dio.patch(
-        '$_path/${product.id}',
-        data: _write(product),
-        queryParameters: {'expand': _expand},
-      );
-      return _map(Map<String, dynamic>.from(response.data as Map));
+    return guardSb(() async {
+      await _client
+          .from('products')
+          .update({
+            'name': product.name,
+            'sku': product.sku,
+            'supplier_id': product.supplierId,
+            'price': product.price,
+            'stock': product.stock,
+            'rating': product.rating,
+          })
+          .eq('id', product.id);
+      await _syncLinks(product.id, product.brandIds, product.categoryIds);
+      return (await findById(product.id))!;
     });
   }
 
   @override
   Future<void> softDelete(String id) async {
     await _auth.ensureLibrarian();
-    await guard(
-      () => _dio.patch(
-        '$_path/$id',
-        data: {
-          'deleted': true,
-          'deletedAt': DateTime.now().toUtc().toIso8601String(),
-        },
-      ),
+    await guardSb(
+      () => _client
+          .from('products')
+          .update({
+            'deleted': true,
+            'deleted_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', id),
     );
   }
 
   @override
   Future<void> hardDelete(String id) async {
     await _auth.ensureAdmin();
-    await guard(() => _dio.delete('$_path/$id'));
+    await guardSb(() => _client.from('products').delete().eq('id', id));
   }
 
   @override
   Future<void> restore(String id) async {
     await _auth.ensureAdmin();
-    await guard(
-      () =>
-          _dio.patch('$_path/$id', data: {'deleted': false, 'deletedAt': null}),
+    await guardSb(
+      () => _client
+          .from('products')
+          .update({'deleted': false, 'deleted_at': null})
+          .eq('id', id),
     );
   }
 
@@ -189,13 +257,19 @@ class ApiProductRepository implements ProductRepository {
 
   @override
   Future<bool> isSkuTaken(String sku, {String? excludeId}) async {
-    final page = await find(ProductQuery(search: sku.trim(), size: 50));
-    final needle = sku.trim().toUpperCase();
-    return page.items.any(
-      (p) =>
-          p.sku.toUpperCase() == needle &&
-          (excludeId == null || excludeId.isEmpty || p.id != excludeId),
-    );
+    await _auth.ensureLoggedIn();
+    return guardSb(() async {
+      var q = _client
+          .from('products')
+          .select('id')
+          .eq('sku', sku)
+          .eq('deleted', false);
+      final rows = await q;
+      for (final r in (rows as List).whereType<Map>()) {
+        if (excludeId == null || r['id'] != excludeId) return true;
+      }
+      return false;
+    });
   }
 
   @override
@@ -203,14 +277,14 @@ class ApiProductRepository implements ProductRepository {
     String supplierId, {
     bool includeDeleted = false,
   }) async {
-    final page = await find(
-      ProductQuery(
-        supplierId: supplierId,
-        size: 1,
-        includeDeleted: includeDeleted,
-      ),
-    );
-    return page.total;
+    return guardSb(() async {
+      var q = _client
+          .from('products')
+          .select('id')
+          .eq('supplier_id', supplierId);
+      if (!includeDeleted) q = q.eq('deleted', false);
+      return ((await q) as List).length;
+    });
   }
 
   @override
@@ -218,10 +292,23 @@ class ApiProductRepository implements ProductRepository {
     String brandId, {
     bool includeDeleted = false,
   }) async {
-    final page = await find(
-      ProductQuery(brandId: brandId, size: 1, includeDeleted: includeDeleted),
-    );
-    return page.total;
+    return guardSb(() async {
+      final links = await _client
+          .from('product_brands')
+          .select('product_id')
+          .eq('brand_id', brandId);
+      final ids = [
+        for (final r in (links as List).whereType<Map>()) '${r['product_id']}',
+      ];
+      if (ids.isEmpty) return 0;
+      if (includeDeleted) return ids.length;
+      final rows = await _client
+          .from('products')
+          .select('id')
+          .inFilter('id', ids)
+          .eq('deleted', false);
+      return (rows as List).length;
+    });
   }
 
   @override
@@ -229,13 +316,22 @@ class ApiProductRepository implements ProductRepository {
     String categoryId, {
     bool includeDeleted = false,
   }) async {
-    final page = await find(
-      ProductQuery(
-        categoryId: categoryId,
-        size: 1,
-        includeDeleted: includeDeleted,
-      ),
-    );
-    return page.total;
+    return guardSb(() async {
+      final links = await _client
+          .from('product_categories')
+          .select('product_id')
+          .eq('category_id', categoryId);
+      final ids = [
+        for (final r in (links as List).whereType<Map>()) '${r['product_id']}',
+      ];
+      if (ids.isEmpty) return 0;
+      if (includeDeleted) return ids.length;
+      final rows = await _client
+          .from('products')
+          .select('id')
+          .inFilter('id', ids)
+          .eq('deleted', false);
+      return (rows as List).length;
+    });
   }
 }

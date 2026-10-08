@@ -1,124 +1,69 @@
-import 'package:dio/dio.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-import '../core/api_client.dart';
-import '../core/api_exceptions.dart';
 import '../core/auth_session.dart';
 import '../core/pb_ids.dart';
-import '../core/pb_query.dart';
+import '../core/supabase_map.dart';
 import '../models/customer.dart';
 import '../models/customer_query.dart';
-import '../models/loyalty_card.dart';
 import '../models/page_result.dart';
 import 'customer_repository.dart';
 
 class ApiCustomerRepository implements CustomerRepository {
-  ApiCustomerRepository(this._dio, this._auth);
-  final Dio _dio;
+  ApiCustomerRepository(this._client, this._auth);
+
+  final SupabaseClient _client;
   final AuthSession _auth;
-  CancelToken? _findToken;
 
-  static const _path = '/collections/customers/records';
-  static const _cards = '/collections/loyalty_cards/records';
+  static const _select = '*, loyalty_cards(*)';
 
-  Future<Map<String, LoyaltyCard>> _cardsByCustomer({
-    String? customerId,
-    String? level,
-  }) async {
-    final parts = <String>[
-      if (customerId != null && customerId.isNotEmpty)
-        'customer = "${pbEscape(customerId)}"',
-      if (level != null && level.isNotEmpty) 'level = "${pbEscape(level)}"',
-      '(deleted = false || deleted = null)',
-    ];
-    final response = await _dio.get(
-      _cards,
-      queryParameters: {
-        'page': 1,
-        'perPage': 200,
-        'filter': parts.join(' && '),
-      },
-    );
-    final items = (response.data as Map)['items'] as List? ?? const [];
-    final map = <String, LoyaltyCard>{};
-    for (final raw in items.whereType<Map>()) {
-      final m = Map<String, dynamic>.from(raw);
-      final cid = pbId(m['customer']);
-      map[cid] = LoyaltyCard.fromJson({
-        'id': pbId(m['id']),
-        'number': m['number'],
-        'issuedAt': m['issuedAt'],
-        'points': m['points'],
-        'level': m['level'],
-      });
-    }
-    return map;
-  }
-
-  Customer _map(Map<String, dynamic> raw, LoyaltyCard? card) {
-    final base = pbRecordToApp(raw);
-    base['card'] =
-        card?.toJson() ??
-        {
-          'number': '',
-          'issuedAt': DateTime.now().toIso8601String(),
-          'points': 0,
-          'level': 'Стандарт',
-        };
-    return Customer.fromJson(base);
-  }
+  Customer _map(Map<String, dynamic> row) =>
+      Customer.fromJson(mapCustomerRow(row));
 
   @override
   Future<PageResult<Customer>> find(CustomerQuery q) async {
     await _auth.ensureLoggedIn();
-    _findToken?.cancel('устаревший поиск');
-    _findToken = CancelToken();
-    final token = _findToken!;
-
-    return guardRead(() async {
-      final cards = await _cardsByCustomer(level: q.cardLevel);
-      final allowedIds =
-          q.cardLevel == null || q.cardLevel!.isEmpty
-              ? null
-              : cards.keys.toSet();
-
-      final parts =
-          <String>[
-            if (q.search.trim().isNotEmpty)
-              pbSearchFilter(q.search, const ['fullName', 'email', 'phone']),
-          ].where((e) => e.isNotEmpty).toList();
-
-      final response = await _dio.get(
-        _path,
-        queryParameters:
-            PbListQuery(
-              page: q.page,
-              perPage: q.size,
-              sort: pbSort(q.sortField, q.sortAscending),
-              filterParts: parts,
-              includeDeleted: q.includeDeleted,
-            ).toParams(),
-        cancelToken: token,
-      );
-      final mapped = pbPageResult(
-        Map<String, dynamic>.from(response.data as Map),
-      );
-      var items =
-          (mapped['items'] as List).whereType<Map>().map((e) {
-            final id = pbId(e['id']);
-            return _map(Map<String, dynamic>.from(e), cards[id]);
-          }).toList();
-      if (allowedIds != null) {
-        items = items.where((c) => allowedIds.contains(c.id)).toList();
+    return guardSb(() async {
+      var query = _client.from('customers').select(_select);
+      if (!q.includeDeleted) query = query.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        query = query.or(
+          'full_name.ilike.%$s%,email.ilike.%$s%,phone.ilike.%$s%',
+        );
       }
-      return PageResult(
-        items: items,
-        page: (mapped['page'] as num).toInt(),
-        size: (mapped['size'] as num).toInt(),
-        total:
-            allowedIds == null
-                ? (mapped['total'] as num).toInt()
-                : items.length,
-      );
+      final sort = switch (q.sortField) {
+        'email' => 'email',
+        'phone' => 'phone',
+        _ => 'full_name',
+      };
+      final start = (q.page - 1) * q.size;
+      final rows = await query
+          .order(sort, ascending: q.sortAscending)
+          .range(start, start + q.size - 1);
+
+      var items =
+          (rows as List)
+              .whereType<Map>()
+              .map((e) => _map(Map<String, dynamic>.from(e)))
+              .toList();
+      if (q.cardLevel != null && q.cardLevel!.isNotEmpty) {
+        items = items.where((c) => c.card.level == q.cardLevel).toList();
+      }
+
+      var countQ = _client.from('customers').select('id');
+      if (!q.includeDeleted) countQ = countQ.eq('deleted', false);
+      if (q.search.trim().isNotEmpty) {
+        final s = q.search.trim();
+        countQ = countQ.or(
+          'full_name.ilike.%$s%,email.ilike.%$s%,phone.ilike.%$s%',
+        );
+      }
+      var total = ((await countQ) as List).length;
+      if (q.cardLevel != null && q.cardLevel!.isNotEmpty) {
+        total = items.length;
+      }
+
+      return PageResult(items: items, page: q.page, size: q.size, total: total);
     });
   }
 
@@ -126,12 +71,16 @@ class ApiCustomerRepository implements CustomerRepository {
   Future<Customer?> findById(String id) async {
     await _auth.ensureLoggedIn();
     try {
-      return await guardRead(() async {
-        final r = await _dio.get('$_path/$id');
-        final cards = await _cardsByCustomer(customerId: id);
-        return _map(Map<String, dynamic>.from(r.data as Map), cards[id]);
+      return await guardSb(() async {
+        final row =
+            await _client
+                .from('customers')
+                .select(_select)
+                .eq('id', id)
+                .single();
+        return _map(Map<String, dynamic>.from(row));
       });
-    } on NotFoundException {
+    } catch (_) {
       return null;
     }
   }
@@ -144,100 +93,87 @@ class ApiCustomerRepository implements CustomerRepository {
     return page.items;
   }
 
-  Future<void> _upsertCard(Customer c) async {
-    final existing = await _cardsByCustomer(customerId: c.id);
-    final body = {
-      'number':
-          c.card.number.isEmpty
-              ? 'LC-${c.id.length >= 8 ? c.id.substring(0, 8).toUpperCase() : c.id}'
-              : c.card.number,
-      'issuedAt': c.card.issuedAt.toUtc().toIso8601String(),
-      'points': c.card.points,
-      'level': c.card.level,
-      'customer': c.id,
-      'deleted': false,
-    };
-    if (existing.containsKey(c.id) && existing[c.id]!.id.isNotEmpty) {
-      await _dio.patch('$_cards/${existing[c.id]!.id}', data: body);
-    } else {
-      await _dio.post(_cards, data: body);
-    }
-  }
-
   @override
   Future<Customer> create(Customer customer) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final r = await _dio.post(
-        _path,
-        data: {
-          'fullName': customer.fullName,
-          'email': customer.email,
-          'phone': customer.phone,
-          'deleted': false,
-        },
-      );
-      // Хук PocketBase создаёт карту лояльности и учётку reader (1 клиент = 1 пользователь).
-      final created = _map(Map<String, dynamic>.from(r.data as Map), null);
-      if (customer.card.number.isNotEmpty || customer.card.points > 0) {
-        await _upsertCard(created.copyWith(card: customer.card));
-      }
-      return (await findById(created.id)) ?? created;
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('customers')
+              .insert({
+                'full_name': customer.fullName,
+                'email': customer.email,
+                'phone': customer.phone,
+              })
+              .select()
+              .single();
+      final id = row['id'] as String;
+      await _client.from('loyalty_cards').insert({
+        'number':
+            customer.card.number.isNotEmpty
+                ? customer.card.number
+                : 'LC-${id.substring(0, 8).toUpperCase()}',
+        'points': customer.card.points,
+        'level': customer.card.level,
+        'customer_id': id,
+        'issued_at': customer.card.issuedAt.toUtc().toIso8601String(),
+      });
+      return (await findById(id))!;
     });
   }
 
   @override
   Future<Customer> update(Customer customer) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      await _dio.patch(
-        '$_path/${customer.id}',
-        data: {
-          'fullName': customer.fullName,
-          'email': customer.email,
-          'phone': customer.phone,
-          'deleted': false,
-        },
-      );
-      await _upsertCard(customer);
-      return (await findById(customer.id)) ?? customer;
+    return guardSb(() async {
+      await _client
+          .from('customers')
+          .update({
+            'full_name': customer.fullName,
+            'email': customer.email,
+            'phone': customer.phone,
+          })
+          .eq('id', customer.id);
+      await _client
+          .from('loyalty_cards')
+          .update({
+            'number': customer.card.number,
+            'points': customer.card.points,
+            'level': customer.card.level,
+          })
+          .eq('customer_id', customer.id);
+      return (await findById(customer.id))!;
     });
   }
 
   @override
   Future<void> softDelete(String id) async {
     await _auth.ensureLibrarian();
-    await guard(
-      () => _dio.patch(
-        '$_path/$id',
-        data: {
-          'deleted': true,
-          'deletedAt': DateTime.now().toUtc().toIso8601String(),
-        },
-      ),
+    await guardSb(
+      () => _client
+          .from('customers')
+          .update({
+            'deleted': true,
+            'deleted_at': DateTime.now().toUtc().toIso8601String(),
+          })
+          .eq('id', id),
     );
   }
 
   @override
   Future<void> hardDelete(String id) async {
     await _auth.ensureAdmin();
-    await guard(() async {
-      final cards = await _cardsByCustomer(customerId: id);
-      for (final card in cards.values) {
-        if (card.id.isNotEmpty) {
-          await _dio.delete('$_cards/${card.id}');
-        }
-      }
-      await _dio.delete('$_path/$id');
-    });
+    await guardSb(() => _client.from('customers').delete().eq('id', id));
   }
 
   @override
   Future<void> restore(String id) async {
     await _auth.ensureAdmin();
-    await guard(
-      () =>
-          _dio.patch('$_path/$id', data: {'deleted': false, 'deletedAt': null}),
+    await guardSb(
+      () => _client
+          .from('customers')
+          .update({'deleted': false, 'deleted_at': null})
+          .eq('id', id),
     );
   }
 
@@ -263,20 +199,24 @@ class ApiCustomerRepository implements CustomerRepository {
 
   @override
   Future<bool> isEmailTaken(String email, {String? excludeId}) async {
-    final page = await find(CustomerQuery(search: email.trim(), size: 50));
-    final needle = email.trim().toLowerCase();
-    return page.items.any(
-      (c) =>
-          c.email.toLowerCase() == needle &&
-          (excludeId == null || excludeId.isEmpty || c.id != excludeId),
-    );
+    await _auth.ensureLoggedIn();
+    return guardSb(() async {
+      final rows = await _client
+          .from('customers')
+          .select('id')
+          .ilike('email', email.trim());
+      for (final r in (rows as List).whereType<Map>()) {
+        if (excludeId == null || r['id'] != excludeId) return true;
+      }
+      return false;
+    });
   }
 }
 
-/// Продажи через кастомный эндпоинт PocketBase (остаток + баллы).
 class ApiSalesRepository {
-  ApiSalesRepository(this._dio, this._auth);
-  final Dio _dio;
+  ApiSalesRepository(this._client, this._auth);
+
+  final SupabaseClient _client;
   final AuthSession _auth;
 
   Future<Map<String, dynamic>> createSale({
@@ -285,23 +225,23 @@ class ApiSalesRepository {
     int pointsToRedeem = 0,
   }) async {
     await _auth.ensureLibrarian();
-    return guard(() async {
-      final response = await _dio.post(
-        '/shop/sales',
-        data: {
-          'customerId': customerId,
-          'pointsToRedeem': pointsToRedeem < 0 ? 0 : pointsToRedeem,
-          'items': [
-            for (final i in items)
-              {'productId': i.productId, 'quantity': i.quantity},
-          ],
+    return guardSb(() async {
+      final payload = [
+        for (final i in items)
+          {'product_id': i.productId, 'quantity': i.quantity},
+      ];
+      final raw = await _client.rpc(
+        'create_sale',
+        params: {
+          'p_customer_id': customerId,
+          'p_items': payload,
+          'p_points_to_redeem': pointsToRedeem < 0 ? 0 : pointsToRedeem,
         },
       );
-      return Map<String, dynamic>.from(response.data as Map);
+      return Map<String, dynamic>.from(raw as Map);
     });
   }
 
-  /// Совместимость со старым вызовом одной позиции.
   Future<void> createSaleLine({
     required String customerId,
     required String productId,
@@ -315,21 +255,15 @@ class ApiSalesRepository {
 
   Future<List<Map<String, dynamic>>> listSales({int size = 50}) async {
     await _auth.ensureLoggedIn();
-    return guardRead(() async {
-      final response = await _dio.get(
-        '/collections/sales/records',
-        queryParameters: {
-          'page': 1,
-          'perPage': size,
-          // У коллекций нет поля created — сортируем по id.
-          'sort': '-id',
-          'expand': 'customer',
-          'filter': 'deleted = false',
-        },
-      );
-      final items = (response.data as Map)['items'] as List? ?? const [];
+    return guardSb(() async {
+      final rows = await _client
+          .from('sales')
+          .select('*, customers(*)')
+          .eq('deleted', false)
+          .order('created_at', ascending: false)
+          .limit(size);
       final result = <Map<String, dynamic>>[];
-      for (final raw in items.whereType<Map>()) {
+      for (final raw in (rows as List).whereType<Map>()) {
         result.add(await _mapSale(Map<String, dynamic>.from(raw)));
       }
       return result;
@@ -338,55 +272,52 @@ class ApiSalesRepository {
 
   Future<Map<String, dynamic>> getSale(String id) async {
     await _auth.ensureLoggedIn();
-    return guardRead(() async {
-      final response = await _dio.get(
-        '/collections/sales/records/${Uri.encodeComponent(id)}',
-        queryParameters: {'expand': 'customer'},
-      );
-      return _mapSale(Map<String, dynamic>.from(response.data as Map));
+    return guardSb(() async {
+      final row =
+          await _client
+              .from('sales')
+              .select('*, customers(*)')
+              .eq('id', id)
+              .single();
+      return _mapSale(Map<String, dynamic>.from(row));
     });
   }
 
   Future<Map<String, dynamic>> _mapSale(Map<String, dynamic> sale) async {
     final saleId = pbId(sale['id']);
-    final itemsRes = await _dio.get(
-      '/collections/sale_items/records',
-      queryParameters: {
-        'page': 1,
-        'perPage': 50,
-        'filter': 'sale = "$saleId"',
-        'expand': 'product',
-      },
-    );
+    final itemsRes = await _client
+        .from('sale_items')
+        .select('*, products(*)')
+        .eq('sale_id', saleId)
+        .eq('deleted', false);
     final lineItems =
-        ((itemsRes.data as Map)['items'] as List? ?? const [])
-            .whereType<Map>()
-            .map((e) {
-              final m = Map<String, dynamic>.from(e);
-              final expand =
-                  m['expand'] is Map
-                      ? Map<String, dynamic>.from(m['expand'] as Map)
-                      : const <String, dynamic>{};
-              return {
-                ...m,
-                'product': expand['product'] ?? m['product'],
-                'productId': pbId(m['product']),
-                'quantity': m['quantity'],
-                'unitPrice': m['unitPrice'],
-              };
-            })
-            .toList();
-    final expand =
-        sale['expand'] is Map
-            ? Map<String, dynamic>.from(sale['expand'] as Map)
-            : const <String, dynamic>{};
+        (itemsRes as List).whereType<Map>().map((e) {
+          final m = Map<String, dynamic>.from(e);
+          final product = m['products'];
+          return {
+            ...m,
+            'product': product,
+            'productId': pbId(m['product_id']),
+            'quantity': m['quantity'],
+            'unitPrice': m['unit_price'],
+          };
+        }).toList();
+    final customer = sale['customers'];
     return {
       'id': saleId,
-      'customerId': pbId(sale['customer']),
-      'customer': expand['customer'],
+      'customerId': pbId(sale['customer_id']),
+      'customer':
+          customer is Map
+              ? {
+                'id': customer['id'],
+                'fullName': customer['full_name'],
+                'phone': customer['phone'],
+                'email': customer['email'],
+              }
+              : null,
       'total': sale['total'],
-      'pointsEarned': sale['pointsEarned'],
-      'pointsRedeemed': sale['pointsRedeemed'],
+      'pointsEarned': sale['points_earned'],
+      'pointsRedeemed': sale['points_redeemed'],
       'items': lineItems,
       'product': lineItems.isNotEmpty ? lineItems.first['product'] : null,
       'quantity': lineItems.isNotEmpty ? lineItems.first['quantity'] : null,
