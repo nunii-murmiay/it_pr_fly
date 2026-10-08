@@ -5,18 +5,11 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 jobs:
-  build:
+  test-and-deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -38,39 +31,14 @@ jobs:
         run: flutter test
 
       - name: Релизная сборка для подкаталога GitHub Pages
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           BASE="/${{ github.event.repository.name }}/"
-          # Пустые secrets не передаём: иначе fromEnvironment даёт "" и ломает вход.
-          DEFINE_ARGS=""
-          if [ -n "$SUPABASE_URL" ]; then
-            DEFINE_ARGS="$DEFINE_ARGS --dart-define=SUPABASE_URL=$SUPABASE_URL"
-          else
-            echo "SUPABASE_URL secret пуст — URL из lib/core/config.dart"
-          fi
-          if [ -n "$SUPABASE_ANON_KEY" ]; then
-            DEFINE_ARGS="$DEFINE_ARGS --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY"
-          else
-            echo "SUPABASE_ANON_KEY secret пуст — ключ из lib/core/config.dart"
-          fi
-          # shellcheck disable=SC2086
-          flutter build web --release --base-href "$BASE" $DEFINE_ARGS
+          # Ключи берутся из lib/core/config.dart (без пустых dart-define).
+          flutter build web --release --base-href "$BASE"
           cp build/web/index.html build/web/404.html
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - name: Публикация ветки gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: build/web
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web

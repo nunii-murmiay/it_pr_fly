@@ -45,8 +45,14 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() => _error = e.message);
     } on ApiException catch (e) {
       setState(() => _error = e.message);
-    } catch (_) {
-      setState(() => _error = 'Не удалось войти. Проверьте сервер.');
+    } catch (e) {
+      final text = e.toString();
+      setState(() {
+        _error =
+            text.contains('<html') || text.contains('Unexpected token')
+                ? 'Нет связи с Supabase. Обновите сайт (Ctrl+F5) или проверьте ключи.'
+                : 'Не удалось войти: $text';
+      });
     } finally {
       if (mounted) setState(() => _loading = false);
     }
