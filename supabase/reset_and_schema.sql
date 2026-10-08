@@ -25,7 +25,19 @@ drop table if exists public.suppliers cascade;
 drop table if exists public.customers cascade;
 drop table if exists public.profiles cascade;
 
--- ========== HELPERS ==========
+-- ========== PROFILES ==========
+create table public.profiles (
+  id uuid primary key references auth.users (id) on delete cascade,
+  username text not null unique,
+  full_name text not null default '',
+  email text not null default '',
+  role text not null default 'reader'
+    check (role in ('reader', 'librarian', 'admin')),
+  customer_id uuid null,
+  created_at timestamptz not null default now()
+);
+
+-- ========== HELPERS (после profiles — иначе ERROR 42P01) ==========
 create or replace function public.current_role()
 returns text
 language sql
@@ -71,18 +83,6 @@ as $$
     else 'Стандарт'
   end;
 $$;
-
--- ========== PROFILES ==========
-create table public.profiles (
-  id uuid primary key references auth.users (id) on delete cascade,
-  username text not null unique,
-  full_name text not null default '',
-  email text not null default '',
-  role text not null default 'reader'
-    check (role in ('reader', 'librarian', 'admin')),
-  customer_id uuid null,
-  created_at timestamptz not null default now()
-);
 
 -- ========== CORE TABLES ==========
 create table public.suppliers (
