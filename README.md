@@ -18,7 +18,8 @@ git remote add origin https://github.com/ТВОЙ_ЛОГИН/ИМЯ_РЕПО.git
 git push -u origin main
 ```
 
-3. Settings → Pages → Build and deployment → Source: **GitHub Actions**.
+3. Settings → Pages → Build and deployment → Source: **GitHub Actions**  
+   (workflow сам выкладывает сайт через `actions/deploy-pages`).
 
 Сайт после зелёного Actions:  
 `https://ТВОЙ_ЛОГИН.github.io/ИМЯ_РЕПО/`
@@ -87,33 +88,27 @@ Project Settings → **API**:
 
 ---
 
-## Часть 6. Подключить ключи и опубликовать
+## Часть 6. Ключи через GitHub Secrets
 
-### Вариант A — вписать в код (быстрее)
-Открой [`lib/core/config.dart`](lib/core/config.dart) и замени дефолты:
+1. Открой репозиторий на GitHub → **Settings**
+2. Слева: **Secrets and variables** → **Actions**
+3. **New repository secret** — два раза:
 
-```dart
-defaultValue: 'https://xxxxx.supabase.co',
-defaultValue: 'eyJhbGciOi...',
-```
+| Name | Value |
+|---|---|
+| `SUPABASE_URL` | `https://xxxxx.supabase.co` (без `/rest/v1/`) |
+| `SUPABASE_ANON_KEY` | anon / public ключ (`eyJ...`) |
 
-Затем:
+4. Запушь код (workflow подхватит secrets сам):
 
 ```powershell
 git add .
-git commit -m "Ключи Supabase"
+git commit -m "Сборка с GitHub Secrets"
 git push origin main
 ```
 
-### Вариант B — GitHub Secrets (аккуратнее)
-Settings → Secrets and variables → Actions:
-
-- `SUPABASE_URL`
-- `SUPABASE_ANON_KEY`
-
-Workflow уже передаёт их в `--dart-define`.
-
-Дождись зелёного **Сборка и публикация зоомагазина**.
+Дождись зелёного **Сборка и публикация зоомагазина**.  
+Если secrets пустые — сборка упадёт с понятной ошибкой.
 
 ---
 
